@@ -1,5 +1,5 @@
-fastapi
-uvicorn
-pymongo
-ultralytics
-opencv-python
+fastapi[all]
+uvicorn[all]
+pymongo[all]
+ultralytics[all]
+opencv-python[all]
