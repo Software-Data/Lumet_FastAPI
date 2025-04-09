@@ -1,5 +1,4 @@
 services:
-  # A Docker web service
   - type: web
     name: inspeccion-de-calidad-ia
     runtime: python
