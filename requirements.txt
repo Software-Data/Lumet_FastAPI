@@ -1,7 +1,8 @@
 fastapi[all]
-uvicorn[all]
-pymongo[all]
-ultralytics[all]
-opencv-python[all]
-numpy[all]
-pillow[all]
+uvicorn[standard]
+pymongo
+ultralytics
+opencv-python
+numpy
+pillow
+python-multipart
