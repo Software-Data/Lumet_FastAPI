@@ -12,7 +12,7 @@ from ultralytics import YOLO
 import colorsys
 
 # --- MongoDB ---
-MONGO_URI = "mongodb://192.168.100.10:27017/"
+MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI)
 db = client["lumet"]
 coll_in = db["imagens"]
