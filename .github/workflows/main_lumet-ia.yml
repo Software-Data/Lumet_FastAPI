@@ -15,10 +15,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python version
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'  # Usa una versión estable, aún no uses 3.13 en producción
+          python-version: '3.11'  # Usa una versión estable para producción
 
       - name: Install dependencies
         run: |
@@ -27,9 +27,13 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Archive project files
+      - name: Prepare deployment package
         run: |
-          zip -r release.zip . -x "venv/*" ".git/*" ".github/*"
+          mkdir package
+          shopt -s extglob
+          cp -r !(venv|__pycache__|.git|.github|package|release.zip|*.zip) package/
+          cd package
+          zip -r ../release.zip .
 
       - name: Upload artifact for deployment
         uses: actions/upload-artifact@v4
@@ -45,15 +49,15 @@ jobs:
       contents: read
 
     steps:
-      - name: Download artifact
+      - name: Download artifact from build
         uses: actions/download-artifact@v4
         with:
           name: python-app
 
-      - name: Unzip artifact
+      - name: Extract artifact
         run: unzip release.zip
 
-      - name: Login to Azure
+      - name: Azure login
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_146B089416054D6B96A5CDBC6F185A5D }}
