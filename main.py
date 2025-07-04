@@ -102,7 +102,6 @@ def marcar_cuadricula(imagen, imperfecciones, filas=15, columnas=15, color_cuadr
         x1 = x0 + paso_x
         y1 = y0 + paso_y
         draw.rectangle([x0, y0, x1, y1], outline=color_celdas, width=3)
-    return imagen
 
     draw = ImageDraw.Draw(imagen)
     ancho, alto = imagen.size
@@ -120,7 +119,7 @@ def marcar_cuadricula(imagen, imperfecciones, filas=15, columnas=15, color_cuadr
         x1 = x0 + paso_x
         y1 = y0 + paso_y
         draw.rectangle([x0, y0, x1, y1], outline=color_cuadricula, width=2)
-    return imagen
+    return draw
 
 # --- Endpoint ---
 @app.post("/analizar")
