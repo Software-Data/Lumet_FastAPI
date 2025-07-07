@@ -29,6 +29,20 @@ class AnalisisRequest(BaseModel):
 
 # --- Utilidades ---
 
+# --- Endpoint ---
+import logging
+
+# Configura el logger
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("lumet")
+
+# Log de conexión exitosa
+try:
+    client.admin.command('ping')
+    logger.info("Conexión a MongoDB realizada correctamente")
+except Exception as e:
+    logger.error(f"Error de conexión a MongoDB: {e}")
+
 def rgb_to_hex(rgb):
     return "#{:02x}{:02x}{:02x}".format(*rgb).upper()
 
@@ -103,6 +117,7 @@ def marcar_cuadricula(imagen, imperfecciones, filas=15, columnas=15, color_cuadr
         y1 = y0 + paso_y
         draw.rectangle([x0, y0, x1, y1], outline=color_celdas, width=3)
 
+    return (imagen)
     draw = ImageDraw.Draw(imagen)
     ancho, alto = imagen.size
     paso_x = ancho // columnas
@@ -121,7 +136,27 @@ def marcar_cuadricula(imagen, imperfecciones, filas=15, columnas=15, color_cuadr
         draw.rectangle([x0, y0, x1, y1], outline=color_cuadricula, width=2)
     return draw
 
-# --- Endpoint ---
+
+
+# Endpoint para obtener todas las imágenes normales
+@app.get("/imagenes")
+def get_imagenes():
+    imagenes = list(coll_in.find({}, {"imagen": 0}))  # No enviar el binario
+    for img in imagenes:
+        img["_id"] = str(img["_id"])
+    logger.info(f"Obtenidas {len(imagenes)} imágenes normales")
+    return imagenes
+
+# Endpoint para obtener todas las imágenes analizadas
+@app.get("/imagenes-analizadas")
+def get_imagenes_analizadas():
+    imagenes = list(coll_out.find({}, {"imagen_resultado": 0}))
+    for img in imagenes:
+        img["_id"] = str(img["_id"])
+        img["imagen_original_id"] = str(img["imagen_original_id"])
+    logger.info(f"Obtenidas {len(imagenes)} imágenes analizadas")
+    return imagenes
+
 @app.post("/analizar")
 async def analizar(req: AnalisisRequest):
     try:
