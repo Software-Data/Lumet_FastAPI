@@ -9,9 +9,6 @@ on:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
 
     steps:
       - name: Checkout code
@@ -27,16 +24,9 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Azure login
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_146B089416054D6B96A5CDBC6F185A5D }}
-          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_9844CCA7858444B48A7445A05309D121 }}
-          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_D67D6FD0F8F1464CAF64AE540E1CC51E }}
-
-      - name: Deploy to Azure Web App
-        uses: azure/webapps-deploy@v3
+      - name: Deploy to Azure Web App using publish profile
+        uses: azure/webapps-deploy@v2
         with:
           app-name: 'lumet-ia'
-          slot-name: 'Production'
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
           package: .
