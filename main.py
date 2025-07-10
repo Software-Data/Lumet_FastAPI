@@ -224,4 +224,5 @@ async def analizar(req: AnalisisRequest):
         )
 
     except Exception as e:
+        logger.error("Error en el endpoint /analizar", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
