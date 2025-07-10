@@ -67,3 +67,4 @@ jobs:
           app-name: 'ia-lumet'
           slot-name: 'Production'
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_80C0B48354164CEF8164A874608E360E }}
+          package: release.zip
