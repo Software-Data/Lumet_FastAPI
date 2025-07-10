@@ -1,5 +1,6 @@
 fastapi[all]
 uvicorn[standard]
+gunicorn
 pymongo
 ultralytics
 opencv-python
