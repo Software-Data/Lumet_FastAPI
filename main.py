@@ -1,77 +1,65 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-import os
-from io import BytesIO
-from collections import Counter
-import numpy as np
-from PIL import Image, ImageDraw
 from pymongo import MongoClient
 from bson import ObjectId
 from ultralytics import YOLO
-import colorsys
-
-# --- MongoDB ---
-MONGO_URI = os.getenv("MONGO_URI")
-client = MongoClient(MONGO_URI)
-db = client["lumet"]
-coll_in = db["imagens"]
-coll_out = db["imagenes_analizadas"]
-
-# --- App ---
-app = FastAPI(title="Inspección de Carrocerías con IA")
-model = YOLO("entrenamientos/imperfecciones_carroceria/weights/last.pt")
-
-# --- Pydantic ---
-class AnalisisRequest(BaseModel):
-    id: str
-    color_referencia: str  # formato: "#AABBCC"
-
-# --- Utilidades ---
-
-# --- Endpoint ---
+from collections import Counter
+from PIL import Image, ImageDraw
+import numpy as np
+import os
+from io import BytesIO
 import logging
 
-# Configura el logger
+# --- Configuración del logger ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("lumet")
 
-# Log de conexión exitosa
+# --- Conexión a MongoDB ---
+MONGO_URI = os.getenv("MONGO_URI")
+client = MongoClient(MONGO_URI)
 try:
     client.admin.command('ping')
     logger.info("Conexión a MongoDB realizada correctamente")
 except Exception as e:
-    logger.error(f"Error de conexión a MongoDB: {e}")
+    logger.error("Error de conexión a MongoDB", exc_info=True)
+    raise
 
+db = client["lumet"]
+coll_in = db["imagens"]
+coll_out = db["imagenes_analizadas"]
+
+# --- Modelo YOLO ---
+model = YOLO("entrenamientos/imperfecciones_carroceria/weights/last.pt")
+
+# --- App FastAPI ---
+app = FastAPI(title="Inspección de Carrocerías con IA")
+
+# --- Modelos ---
+class AnalisisRequest(BaseModel):
+    id: str
+    color_referencia: str  # Ej. "#AABBCC"
+
+# --- Utilidades ---
 def rgb_to_hex(rgb):
     return "#{:02x}{:02x}{:02x}".format(*rgb).upper()
 
 def calcular_color_principal_hex(image: Image.Image) -> str:
-    img_red = image.resize((50, 50))
-    pixels = np.array(img_red).reshape(-1, 3)
-    colores = Counter([tuple(p) for p in pixels])
-    color_rgb = colores.most_common(1)[0][0]
+    resized = image.resize((50, 50))
+    pixels = np.array(resized).reshape(-1, 3)
+    color_rgb = Counter(map(tuple, pixels)).most_common(1)[0][0]
     return rgb_to_hex(color_rgb)
 
 def obtener_color_contraste(hex_color):
     r, g, b = [int(hex_color[i:i+2], 16) for i in (1, 3, 5)]
-    # Luminosidad según fórmula W3C
-    luminancia = (0.299 * r + 0.587 * g + 0.114 * b)
-    return "#000000" if luminancia > 186 else "#000000"
+    luminancia = 0.299 * r + 0.587 * g + 0.114 * b
+    return "#000000" if luminancia > 186 else "#FFFFFF"
 
-def dividir_en_cuadricula(imagen, filas=15, columnas=15):
-    alto, ancho = imagen.shape[:2]
-    tam_y = alto // filas
-    tam_x = ancho // columnas
-    secciones = []
-    for y in range(filas):
-        for x in range(columnas):
-            x_ini = x * tam_x
-            y_ini = y * tam_y
-            x_fin = x_ini + tam_x
-            y_fin = y_ini + tam_y
-            secciones.append(((x, y), (x_ini, y_ini, x_fin, y_fin)))
-    return secciones
+def dividir_en_cuadricula(img_np, filas=15, columnas=15):
+    alto, ancho = img_np.shape[:2]
+    return [((x, y), (x * ancho // columnas, y * alto // filas,
+                     (x+1) * ancho // columnas, (y+1) * alto // filas))
+            for y in range(filas) for x in range(columnas)]
 
 def encontrar_cuadros_con_objetos(results, cuadricula):
     imperfecciones = set()
@@ -81,80 +69,53 @@ def encontrar_cuadros_con_objetos(results, cuadricula):
         for box in result.boxes.xyxy:
             x1, y1, x2, y2 = map(int, box.int().tolist())
             cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-            for (grid_x, grid_y), (xi, yi, xf, yf) in cuadricula:
+            for (gx, gy), (xi, yi, xf, yf) in cuadricula:
                 if xi <= cx <= xf and yi <= cy <= yf:
-                    imperfecciones.add((grid_x, grid_y))
+                    imperfecciones.add((gx, gy))
     return list(imperfecciones)
 
-def comparar_colores(c_referencia, c_dominante):
+def comparar_colores(hex1, hex2):
     def hex_to_rgb(h): return tuple(int(h[i:i+2], 16) for i in (1, 3, 5))
-    r1, g1, b1 = hex_to_rgb(c_referencia)
-    r2, g2, b2 = hex_to_rgb(c_dominante)
-    distancia = np.sqrt((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2)
-    max_dist = np.sqrt(255 ** 2 * 3)
-    similitud = (1 - (distancia / max_dist)) * 100
-    return max(0, round(similitud, 2))  # nunca menos de 0%
+    r1, g1, b1 = hex_to_rgb(hex1)
+    r2, g2, b2 = hex_to_rgb(hex2)
+    distancia = np.linalg.norm([r1 - r2, g1 - g2, b1 - b2])
+    return max(0, round((1 - distancia / (255 * (3**0.5))) * 100, 2))
 
-def marcar_cuadricula(imagen, imperfecciones, filas=15, columnas=15, color_cuadricula="#FF0000", color_celdas="#0000FF"):
+def marcar_cuadricula(imagen, imperfecciones, filas=15, columnas=15,
+                      color_cuadricula="#FF0000", color_celdas="#0000FF"):
     draw = ImageDraw.Draw(imagen)
     ancho, alto = imagen.size
     paso_x = ancho // columnas
     paso_y = alto // filas
-    
-    # Dibuja cuadrícula (líneas)
+
     for x in range(columnas + 1):
-        x0 = x * paso_x
-        draw.line([(x0, 0), (x0, alto)], fill=color_cuadricula, width=1)
+        draw.line([(x * paso_x, 0), (x * paso_x, alto)], fill=color_cuadricula, width=1)
     for y in range(filas + 1):
-        y0 = y * paso_y
-        draw.line([(0, y0), (ancho, y0)], fill=color_cuadricula, width=1)
-    
-    # Dibuja rectángulos en celdas con imperfecciones
-    for grid_x, grid_y in imperfecciones:
-        x0 = grid_x * paso_x
-        y0 = grid_y * paso_y
-        x1 = x0 + paso_x
-        y1 = y0 + paso_y
+        draw.line([(0, y * paso_y), (ancho, y * paso_y)], fill=color_cuadricula, width=1)
+
+    for gx, gy in imperfecciones:
+        x0, y0 = gx * paso_x, gy * paso_y
+        x1, y1 = x0 + paso_x, y0 + paso_y
         draw.rectangle([x0, y0, x1, y1], outline=color_celdas, width=3)
 
-    return (imagen)
-    draw = ImageDraw.Draw(imagen)
-    ancho, alto = imagen.size
-    paso_x = ancho // columnas
-    paso_y = alto // filas
-    for x in range(columnas):
-        x0 = x * paso_x
-        draw.line([(x0, 0), (x0, alto)], fill=color_cuadricula, width=1)
-    for y in range(filas):
-        y0 = y * paso_y
-        draw.line([(0, y0), (ancho, y0)], fill=color_cuadricula, width=1)
-    for grid_x, grid_y in imperfecciones:
-        x0 = grid_x * paso_x
-        y0 = grid_y * paso_y
-        x1 = x0 + paso_x
-        y1 = y0 + paso_y
-        draw.rectangle([x0, y0, x1, y1], outline=color_cuadricula, width=2)
-    return draw
+    return imagen
 
-
-
-# Endpoint para obtener todas las imágenes normales
+# --- Endpoints ---
 @app.get("/imagenes")
 def get_imagenes():
-    imagenes = list(coll_in.find({}, {"imagen": 0}))  # No enviar el binario
+    imagenes = list(coll_in.find({}, {"imagen": 0}))
     for img in imagenes:
         img["_id"] = str(img["_id"])
-    logger.info(f"Obtenidas {len(imagenes)} imágenes normales")
+    logger.info(f"{len(imagenes)} imágenes obtenidas desde la colección original")
     return imagenes
 
-# Endpoint para obtener todas las imágenes analizadas
 @app.get("/imagenes-analizadas")
 def get_imagenes_analizadas():
     imagenes = list(coll_out.find({}, {"imagen_resultado": 0}))
     for img in imagenes:
         img["_id"] = str(img["_id"])
         img["imagen_original_id"] = str(img["imagen_original_id"])
-    logger.info(f"Obtenidas {len(imagenes)} imágenes analizadas")
+    logger.info(f"{len(imagenes)} imágenes obtenidas desde la colección analizada")
     return imagenes
 
 @app.post("/analizar")
@@ -164,16 +125,13 @@ async def analizar(req: AnalisisRequest):
         if not doc:
             raise HTTPException(status_code=404, detail="Imagen no encontrada")
 
-        buffer = doc["imagen"]
-        imagen_pil = Image.open(BytesIO(buffer)).convert("RGB")
+        imagen_pil = Image.open(BytesIO(doc["imagen"])).convert("RGB")
         imagen_np = np.array(imagen_pil)
 
-        # Obtener color principal y contraste
         color_dominante = calcular_color_principal_hex(imagen_pil)
         color_contraste = obtener_color_contraste(color_dominante)
         similitud = comparar_colores(color_dominante, req.color_referencia)
 
-        # Detección
         results = model.predict(imagen_np, verbose=False)
         cuadricula = dividir_en_cuadricula(imagen_np)
         imperfecciones_cuadricula = encontrar_cuadros_con_objetos(results, cuadricula)
@@ -189,11 +147,11 @@ async def analizar(req: AnalisisRequest):
                     "bbox": [x1, y1, x2, y2]
                 })
 
-        imagen_marcada = marcar_cuadricula(imagen_pil.copy(), imperfecciones_cuadricula, color_celdas=color_contraste)
-        output_buffer = BytesIO()
-        imagen_marcada.save(output_buffer, format="PNG")
-        output_buffer.seek(0)
-        imagen_resultante = output_buffer.getvalue()
+        imagen_marcada = marcar_cuadricula(imagen_pil.copy(), imperfecciones_cuadricula,
+                                           color_celdas=color_contraste)
+        buffer_out = BytesIO()
+        imagen_marcada.save(buffer_out, format="PNG")
+        buffer_out.seek(0)
 
         result_doc = {
             "imagen_original_id": ObjectId(req.id),
@@ -202,7 +160,7 @@ async def analizar(req: AnalisisRequest):
             "similitud_color": similitud,
             "imperfecciones": imperfecciones_detalles,
             "cuadricula_afectada": [{"x": x, "y": y} for x, y in imperfecciones_cuadricula],
-            "imagen_resultado": imagen_resultante,
+            "imagen_resultado": buffer_out.getvalue(),
             "contentType": "image/png"
         }
 
@@ -220,9 +178,9 @@ async def analizar(req: AnalisisRequest):
                 "detalles": imperfecciones_detalles,
                 "cuadricula_afectada": result_doc["cuadricula_afectada"],
                 "contentType": "image/png"
-            },
+            }
         )
 
     except Exception as e:
         logger.error("Error en el endpoint /analizar", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
