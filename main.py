@@ -1,21 +1,25 @@
+import os
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from pymongo import MongoClient
 from bson import ObjectId
-from ultralytics import YOLO
-from collections import Counter
 from PIL import Image, ImageDraw
 import numpy as np
-import os
 from io import BytesIO
 import logging
 
-# --- Configuración del logger ---
+# Detectron2 imports
+from detectron2.engine import DefaultPredictor
+from detectron2.config import get_cfg
+from detectron2.utils.visualizer import Visualizer, ColorMode
+from detectron2.data import MetadataCatalog
+
+# --- Logger ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("lumet")
 
-# --- Conexión a MongoDB ---
+# --- MongoDB ---
 MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI)
 try:
@@ -29,16 +33,24 @@ db = client["lumet"]
 coll_in = db["imagens"]
 coll_out = db["imagenes_analizadas"]
 
-# --- Modelo YOLO ---
-model = YOLO("entrenamientos/imperfecciones_carroceria/weights/last.pt")
+# --- Configurar Detectron2 ---
 
-# --- App FastAPI ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+cfg = get_cfg()
+cfg.merge_from_file(os.path.join(BASE_DIR, "configs", "mask_rcnn_R_50_FPN_3x.yaml"))
+cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.5
+cfg.MODEL.ROI_HEADS.NUM_CLASSES = 1  # Cambia si tienes más clases
+cfg.MODEL.WEIGHTS = os.path.join(BASE_DIR, "output", "model_final.pth")
+predictor = DefaultPredictor(cfg)
+metadata = MetadataCatalog.get(cfg.DATASETS.TRAIN[0]) if cfg.DATASETS.TRAIN else MetadataCatalog.get("__unused")
+
+# --- FastAPI ---
 app = FastAPI(title="Inspección de Carrocerías con IA")
 
-# --- Modelos ---
+# --- Modelos Pydantic ---
 class AnalisisRequest(BaseModel):
     id: str
-    color_referencia: str  # Ej. "#AABBCC"
+    color_referencia: str  # Ejemplo: "#AABBCC"
 
 # --- Utilidades ---
 def rgb_to_hex(rgb):
@@ -55,52 +67,7 @@ def obtener_color_contraste(hex_color):
     luminancia = 0.299 * r + 0.587 * g + 0.114 * b
     return "#000000" if luminancia > 186 else "#FFFFFF"
 
-def dividir_en_cuadricula(img_np, filas=15, columnas=15):
-    alto, ancho = img_np.shape[:2]
-    return [((x, y), (x * ancho // columnas, y * alto // filas,
-                     (x+1) * ancho // columnas, (y+1) * alto // filas))
-            for y in range(filas) for x in range(columnas)]
-
-def encontrar_cuadros_con_objetos(results, cuadricula):
-    imperfecciones = set()
-    for result in results:
-        if result.boxes is None:
-            continue
-        for box in result.boxes.xyxy:
-            x1, y1, x2, y2 = map(int, box.int().tolist())
-            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-            for (gx, gy), (xi, yi, xf, yf) in cuadricula:
-                if xi <= cx <= xf and yi <= cy <= yf:
-                    imperfecciones.add((gx, gy))
-    return list(imperfecciones)
-
-def comparar_colores(hex1, hex2):
-    def hex_to_rgb(h): return tuple(int(h[i:i+2], 16) for i in (1, 3, 5))
-    r1, g1, b1 = hex_to_rgb(hex1)
-    r2, g2, b2 = hex_to_rgb(hex2)
-    distancia = np.linalg.norm([r1 - r2, g1 - g2, b1 - b2])
-    return max(0, round((1 - distancia / (255 * (3**0.5))) * 100, 2))
-
-def marcar_cuadricula(imagen, imperfecciones, filas=15, columnas=15,
-                      color_cuadricula="#FF0000", color_celdas="#0000FF"):
-    draw = ImageDraw.Draw(imagen)
-    ancho, alto = imagen.size
-    paso_x = ancho // columnas
-    paso_y = alto // filas
-
-    for x in range(columnas + 1):
-        draw.line([(x * paso_x, 0), (x * paso_x, alto)], fill=color_cuadricula, width=1)
-    for y in range(filas + 1):
-        draw.line([(0, y * paso_y), (ancho, y * paso_y)], fill=color_cuadricula, width=1)
-
-    for gx, gy in imperfecciones:
-        x0, y0 = gx * paso_x, gy * paso_y
-        x1, y1 = x0 + paso_x, y0 + paso_y
-        draw.rectangle([x0, y0, x1, y1], outline=color_celdas, width=3)
-
-    return imagen
-
-# --- Endpoints ---
+# --- Endpoint para listar imágenes originales ---
 @app.get("/imagenes")
 def get_imagenes():
     imagenes = list(coll_in.find({}, {"imagen": 0}))
@@ -109,6 +76,7 @@ def get_imagenes():
     logger.info(f"{len(imagenes)} imágenes obtenidas desde la colección original")
     return imagenes
 
+# --- Endpoint para listar imágenes analizadas ---
 @app.get("/imagenes-analizadas")
 def get_imagenes_analizadas():
     imagenes = list(coll_out.find({}, {"imagen_resultado": 0}))
@@ -118,6 +86,9 @@ def get_imagenes_analizadas():
     logger.info(f"{len(imagenes)} imágenes obtenidas desde la colección analizada")
     return imagenes
 
+# --- Endpoint principal de análisis ---
+from collections import Counter
+
 @app.post("/analizar")
 async def analizar(req: AnalisisRequest):
     try:
@@ -125,41 +96,49 @@ async def analizar(req: AnalisisRequest):
         if not doc:
             raise HTTPException(status_code=404, detail="Imagen no encontrada")
 
+        # Abrir imagen (RGB)
         imagen_pil = Image.open(BytesIO(doc["imagen"])).convert("RGB")
-        imagen_np = np.array(imagen_pil)
+        # Convertir a np.array BGR para Detectron2
+        imagen_np = np.array(imagen_pil)[:, :, ::-1]
 
+        # Calcular color dominante y contraste (opcional)
         color_dominante = calcular_color_principal_hex(imagen_pil)
         color_contraste = obtener_color_contraste(color_dominante)
-        similitud = comparar_colores(color_dominante, req.color_referencia)
 
-        results = model.predict(imagen_np, verbose=False)
-        cuadricula = dividir_en_cuadricula(imagen_np)
-        imperfecciones_cuadricula = encontrar_cuadros_con_objetos(results, cuadricula)
+        # Inferencia Detectron2
+        outputs = predictor(imagen_np)
+        instances = outputs["instances"].to("cpu")
+
+        # Extraer info: máscaras, cajas, clases
+        masks = instances.pred_masks.numpy()
+        boxes = instances.pred_boxes.tensor.numpy().astype(int)
+        classes = instances.pred_classes.numpy()
 
         imperfecciones_detalles = []
-        for result in results:
-            for box in result.boxes:
-                cls_id = int(box.cls.item())
-                label = model.names[cls_id]
-                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-                imperfecciones_detalles.append({
-                    "label": label,
-                    "bbox": [x1, y1, x2, y2]
-                })
+        for i in range(len(boxes)):
+            bbox = boxes[i].tolist()
+            label = metadata.get("thing_classes", ["clase_desconocida"])[classes[i]]
+            imperfecciones_detalles.append({
+                "label": label,
+                "bbox": bbox
+            })
 
-        imagen_marcada = marcar_cuadricula(imagen_pil.copy(), imperfecciones_cuadricula,
-                                           color_celdas=color_contraste)
+        # Visualizar resultados sobre la imagen
+        v = Visualizer(imagen_np[:, :, ::-1], metadata=metadata, instance_mode=ColorMode.IMAGE)
+        v = v.draw_instance_predictions(instances)
+        imagen_marcada = Image.fromarray(v.get_image()[:, :, ::-1])
+
+        # Guardar imagen marcada en buffer
         buffer_out = BytesIO()
         imagen_marcada.save(buffer_out, format="PNG")
         buffer_out.seek(0)
 
+        # Guardar resultado en MongoDB
         result_doc = {
             "imagen_original_id": ObjectId(req.id),
             "color_dominante": color_dominante,
             "color_referencia": req.color_referencia,
-            "similitud_color": similitud,
             "imperfecciones": imperfecciones_detalles,
-            "cuadricula_afectada": [{"x": x, "y": y} for x, y in imperfecciones_cuadricula],
             "imagen_resultado": buffer_out.getvalue(),
             "contentType": "image/png"
         }
@@ -173,10 +152,8 @@ async def analizar(req: AnalisisRequest):
                 "id_resultado": str(result_id),
                 "color_dominante": color_dominante,
                 "color_referencia": req.color_referencia,
-                "similitud_color_%": similitud,
                 "imperfecciones_detectadas": len(imperfecciones_detalles),
                 "detalles": imperfecciones_detalles,
-                "cuadricula_afectada": result_doc["cuadricula_afectada"],
                 "contentType": "image/png"
             }
         )
